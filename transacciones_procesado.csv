@@ -1,0 +1,3 @@
+id_transaccion,cliente_id,fecha,monto,tipo,nombre,ciudad,fecha_registro
+1001,1,2024-03-02,50000,COMPRA,Ana Torres,Bogotá,2024-03-01
+1002,2,2024-03-03,30000,ABONO,Juan Pérez,Medellín,2023-12-15

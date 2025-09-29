@@ -1,19 +1,9 @@
 """
-Proceso ETL para la consolidación de movimientos de clientes.
+Módulo principal de la lógica ETL para la consolidación de movimientos de clientes.
 
-Este script realiza un proceso de Extracción, Transformación y Carga (ETL) para
-integrar datos de clientes desde una base de datos PostgreSQL y sus transacciones
-financieras desde un archivo CSV.
-
-El proceso consiste en:
-1.  **Extracción**: Lee los datos de las dos fuentes (PostgreSQL y CSV).
-2.  **Transformación**:
-    - Cruza la información de clientes y transacciones.
-    - Aplica reglas de negocio para limpiar los datos, descartando registros inválidos
-      (ej. montos negativos, transacciones de clientes no existentes).
-3.  **Carga**: Guarda el conjunto de datos consolidado y limpio en un nuevo archivo CSV.
-
-Requiere un archivo .env en la raíz del proyecto para las credenciales de la BD.
+Este script contiene la función principal que ejecuta el flujo de Extracción, 
+Transformación y Carga. Puede ser invocado desde un orquestador o ejecutado 
+directamente para pruebas.
 """
 import pandas as pd
 from sqlalchemy import create_engine
@@ -21,70 +11,78 @@ import os
 import sys
 from dotenv import load_dotenv
 
-# Carga las variables de entorno para el manejo seguro de credenciales.
+# Carga las variables de entorno del archivo .env que debe estar en la raíz del proyecto.
 load_dotenv()
 
-# --- CONFIGURACIÓN ---
-RUTA_SALIDA = '../movimientos_clientes.csv'
+def ejecutar_etl_completo(ruta_csv_transacciones):
+    """
+    Ejecuta el flujo ETL completo para un archivo de transacciones dado.
+    
+    Args:
+        ruta_csv_transacciones (str): La ruta al archivo CSV de transacciones a procesar.
+    """
+    # ============================================================================
+    # === FASE 1: EXTRACCIÓN (EXTRACT) ===
+    # ============================================================================
+    print("\n--- Iniciando Proceso ETL ---")
+    print(f"Procesando archivo de entrada: {ruta_csv_transacciones}")
+    
+    try:
+        df_transacciones = pd.read_csv(ruta_csv_transacciones)
+    except FileNotFoundError:
+        print(f"Error fatal: No se encontró el archivo de transacciones en '{ruta_csv_transacciones}'")
+        return # Termina la función si el archivo no existe.
 
-# ============================================================================
-# === FASE 1: EXTRACCIÓN (EXTRACT) ===
-# ============================================================================
+    # Lee la contraseña de forma segura desde las variables de entorno.
+    db_password = os.getenv("DB_PASSWORD")
+    if not db_password:
+        print("Error fatal: La variable de entorno DB_PASSWORD no está definida en el archivo .env.")
+        return
 
-print("Iniciando la fase de Extracción...")
+    cadena_conexion = f'postgresql://postgres:{db_password}@localhost:5432/bdb_challenge'
+    
+    try:
+        engine = create_engine(cadena_conexion)
+        df_clientes = pd.read_sql('SELECT * FROM clientes', engine)
+    except Exception as e:
+        print(f"Error fatal al conectar o leer la base de datos: {e}")
+        return # Termina la función si la conexión a la BD falla.
 
-# Extracción desde el archivo CSV de transacciones.
-df_transacciones = pd.read_csv('../data/transacciones.csv')
-print("  - Datos de transacciones cargados.")
+    # ============================================================================
+    # === FASE 2: TRANSFORMACIÓN (TRANSFORM) ===
+    # ============================================================================
+    
+    # Enriquecimiento de datos uniendo transacciones y clientes.
+    df_merged = pd.merge(df_transacciones, df_clientes, on='cliente_id', how='left')
+    
+    # Limpieza - Regla 1: Descartar transacciones con montos no positivos.
+    df_limpio = df_merged[df_merged['monto'] > 0].copy()
+    
+    # Limpieza - Regla 2: Descartar transacciones de clientes que no existen.
+    df_limpio = df_limpio[df_limpio['nombre'].notna()].copy()
 
-# Construcción de la cadena de conexión a la BD usando variables de entorno
-# para no exponer credenciales en el código fuente.
-db_password = os.getenv("DB_PASSWORD")
-if not db_password:
-    print("Error: La variable de entorno DB_PASSWORD no está definida.")
-    sys.exit()
+    # ============================================================================
+    # === FASE 3: CARGA (LOAD) ===
+    # ============================================================================
 
-cadena_conexion = f'postgresql://postgres:{db_password}@localhost:5432/bdb_challenge'
+    # Genera un nombre de archivo de salida dinámico.
+    nombre_archivo_salida = os.path.basename(ruta_csv_transacciones).replace('.csv', '_procesado.csv')
+    # Guarda el archivo en la carpeta raíz del proyecto.
+    ruta_salida = f"../{nombre_archivo_salida}" 
+    
+    df_limpio.to_csv(ruta_salida, index=False)
+    
+    print(f"--- Proceso ETL Completado. Resultado guardado en: {ruta_salida} ---")
 
-# Extracción desde la base de datos PostgreSQL.
-try:
-    engine = create_engine(cadena_conexion)
-    df_clientes = pd.read_sql('SELECT * FROM clientes', engine)
-    print("  - Datos de clientes cargados desde la base de datos.")
-except Exception as e:
-    print(f"Error fatal al conectar o leer la base de datos: {e}")
-    sys.exit() # Detiene la ejecución si la conexión a la BD falla.
 
-# ============================================================================
-# === FASE 2: TRANSFORMACIÓN (TRANSFORM) ===
-# ============================================================================
-
-print("\nIniciando la fase de Transformación...")
-
-# Enriquecimiento de datos: Se realiza un left join para cruzar transacciones
-# con los datos de los clientes. Se usa 'left' para conservar todas las
-# transacciones y poder identificar posteriormente aquellas sin un cliente válido.
-df_merged = pd.merge(df_transacciones, df_clientes, on='cliente_id', how='left')
-print("  - Enriquecimiento de datos completado (join).")
-
-# Limpieza de datos aplicando reglas de negocio.
-# Regla 1: Descartar transacciones con montos no positivos.
-df_limpio = df_merged[df_merged['monto'] > 0].copy()
-
-# Regla 2: Descartar transacciones de clientes que no existen en la BD.
-# Se identifican porque las columnas del cliente ('nombre') son nulas tras el join.
-df_limpio = df_limpio[df_limpio['nombre'].notna()].copy()
-print("  - Limpieza de datos inválidos completada.")
-
-# ============================================================================
-# === FASE 3: CARGA (LOAD) ===
-# ============================================================================
-
-print("\nIniciando la fase de Carga...")
-
-# Se guarda el DataFrame limpio en un archivo CSV.
-# Se usa index=False para evitar que Pandas escriba una columna extra con el índice.
-df_limpio.to_csv(RUTA_SALIDA, index=False)
-
-print(f"--- PROCESO ETL COMPLETADO EXITOSAMENTE ---")
-print(f"Los datos consolidados han sido guardados en: {RUTA_SALIDA}")
+# El bloque __main__ permite que este script siga siendo ejecutable por sí mismo.
+# Es útil para realizar pruebas rápidas sin necesidad de usar el orquestador.
+if __name__ == "__main__":
+    
+    # Define la ruta del archivo de prueba por defecto.
+    ruta_prueba = 'data/transacciones.csv'
+    # Ajusta la ruta para que funcione al ejecutar el script desde la carpeta 'src'.
+    ruta_prueba_ajustada = f"../{ruta_prueba}"
+    
+    print("Ejecutando script en modo de prueba independiente...")
+    ejecutar_etl_completo(ruta_prueba_ajustada)
